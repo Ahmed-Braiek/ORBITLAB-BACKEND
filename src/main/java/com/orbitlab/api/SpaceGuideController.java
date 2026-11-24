@@ -68,8 +68,8 @@ public class SpaceGuideController {
 
     public SpaceGuideController(
         @Value("${GEMINI_API_KEY:}") String key,
-        @Value("${GEMINI_MODEL:gemini-2.5-flash-lite}") String model,
-        @Value("${GEMINI_SEARCH_GROUNDING:true}") boolean searchEnabled) {
+        @Value("${GEMINI_MODEL:gemini-3.1-flash-lite}") String model,
+        @Value("${GEMINI_SEARCH_GROUNDING:false}") boolean searchEnabled) {
         this.key = key;
         this.model = model;
         this.searchEnabled = searchEnabled;
