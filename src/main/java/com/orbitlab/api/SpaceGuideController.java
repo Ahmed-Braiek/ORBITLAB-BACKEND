@@ -11,6 +11,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.io.IOException;
+import java.net.http.HttpTimeoutException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,7 +61,8 @@ public class SpaceGuideController {
       """;
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
-    private final String key;
+    private final List<String> keys;
+    private final AtomicInteger nextKey = new AtomicInteger();
     private final String model;
     private final boolean searchEnabled;
     // Guard accidental token consumption in a public classroom demo. This does NOT secure a public deployment.
@@ -68,9 +71,13 @@ public class SpaceGuideController {
 
     public SpaceGuideController(
         @Value("${GEMINI_API_KEY:}") String key,
+        @Value("${GEMINI_API_KEY_1:}") String key1,
+        @Value("${GEMINI_API_KEY_2:}") String key2,
+        @Value("${GEMINI_API_KEY_3:}") String key3,
         @Value("${GEMINI_MODEL:gemini-3.1-flash-lite}") String model,
         @Value("${GEMINI_SEARCH_GROUNDING:false}") boolean searchEnabled) {
-        this.key = key;
+        this.keys=java.util.stream.Stream.of(key1,key2,key3,key)
+            .filter(value->value!=null&&!value.isBlank()).distinct().toList();
         this.model = model;
         this.searchEnabled = searchEnabled;
     }
@@ -84,7 +91,7 @@ public class SpaceGuideController {
 
     @GetMapping("/status")
     public Map<String,Object> status() {
-        return Map.of("configured",!key.isBlank(),"model",model,"localOnly",true,"searchGrounding",searchEnabled);
+        return Map.of("configured",!keys.isEmpty(),"keyCount",keys.size(),"model",model,"localOnly",true,"searchGrounding",searchEnabled);
     }
 
     /** Return safe, actionable diagnostics; never expose the API key or raw request body. */
@@ -99,7 +106,7 @@ public class SpaceGuideController {
 
     @PostMapping("/chat")
     public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        if(key.isBlank()) {
+        if(keys.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                 "Gemini not configured. Set GEMINI_API_KEY in the Spring Boot environment.");
         }
@@ -123,28 +130,9 @@ public class SpaceGuideController {
         if(searchEnabled)body.put("tools",List.of(Map.of("google_search",Map.of())));
         body.put("generationConfig",Map.of("temperature",0.38,"maxOutputTokens",1100));
         try {
-            String payload=json.writeValueAsString(body);
             URI endpoint=URI.create("https://generativelanguage.googleapis.com/v1beta/models/"
                 +java.net.URLEncoder.encode(model,StandardCharsets.UTF_8)+":generateContent");
-            HttpRequest httpRequest=HttpRequest.newBuilder(endpoint)
-                .header("x-goog-api-key",key)
-                .header("Content-Type","application/json")
-                .timeout(Duration.ofSeconds(38))
-                .POST(HttpRequest.BodyPublishers.ofString(payload,StandardCharsets.UTF_8)).build();
-            HttpResponse<String> result=client.send(httpRequest,HttpResponse.BodyHandlers.ofString());
-            boolean fallbackWithoutSearch=false;
-            if(result.statusCode()==400 && searchEnabled && isGroundingError(result.body())){
-                // Only retry requests that Google explicitly rejects due to search/tool configuration.
-                Map<String,Object> plainBody=new LinkedHashMap<>(body);
-                plainBody.remove("tools");
-                HttpRequest fallback=HttpRequest.newBuilder(endpoint)
-                    .header("x-goog-api-key",key)
-                    .header("Content-Type","application/json")
-                    .timeout(Duration.ofSeconds(38))
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(plainBody),StandardCharsets.UTF_8)).build();
-                result=client.send(fallback,HttpResponse.BodyHandlers.ofString());
-                fallbackWithoutSearch=true;
-            }
+            HttpResponse<String> result = sendWithFailover(endpoint,body);
             if(result.statusCode()!=200)throw geminiFailure(result.statusCode(),result.body());
             JsonNode root=json.readTree(result.body());
             JsonNode candidate=root.path("candidates").path(0);
@@ -164,6 +152,48 @@ public class SpaceGuideController {
         }
     }
 
+    /**
+     * Round-robin request ownership across configured credentials.
+     * A different healthy key is tried only after transient 503/504 or transport timeouts.
+     * Explicit quota exhaustion (429), access restrictions (403), and invalid model
+     * errors are returned immediately; this mechanism must not bypass provider limits.
+     */
+    private HttpResponse<String> sendWithFailover(URI endpoint,Map<String,Object> requestBody)
+        throws IOException,InterruptedException {
+        final int start=Math.floorMod(nextKey.getAndIncrement(),keys.size());
+        HttpResponse<String> last=null;
+        IOException lastNetworkError=null;
+        for(int attempt=0;attempt<keys.size();attempt++){
+            String activeKey=keys.get((start+attempt)%keys.size());
+            try {
+                last=sendOnce(endpoint,requestBody,activeKey);
+                if(last.statusCode()==400 && searchEnabled && isGroundingError(last.body())){
+                    Map<String,Object> fallback=new LinkedHashMap<>(requestBody);
+                    fallback.remove("tools");
+                    last=sendOnce(endpoint,fallback,activeKey);
+                }
+                if(last.statusCode()==200)return last;
+                if(last.statusCode()!=503 && last.statusCode()!=504)return last;
+            }catch(HttpTimeoutException e){lastNetworkError=e;}
+            catch(IOException e){lastNetworkError=e;}
+        }
+        if(last!=null)return last;
+        if(lastNetworkError!=null)throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Gemini connection timed out or failed across configured credentials. Check internet access, or try again.",lastNetworkError);
+        throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"No Gemini response was received.");
+    }
+
+    private HttpResponse<String> sendOnce(URI endpoint,Map<String,Object> requestBody,String activeKey)
+        throws IOException,InterruptedException {
+        HttpRequest httpRequest=HttpRequest.newBuilder(endpoint)
+            .header("x-goog-api-key",activeKey)
+            .header("Content-Type","application/json")
+            .timeout(Duration.ofSeconds(11))
+            .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(requestBody),StandardCharsets.UTF_8))
+            .build();
+        return client.send(httpRequest,HttpResponse.BodyHandlers.ofString());
+    }
+
     private ResponseStatusException geminiFailure(int http,String response){
         String description="";
         try {
@@ -174,7 +204,7 @@ public class SpaceGuideController {
             description+=message;
         }catch(Exception ignored){}
         if(description.isBlank())description="Upstream HTTP "+http;
-        description=description.replace(key,"[REDACTED]");
+        for(String secret:keys)description=description.replace(secret,"[REDACTED]");
         description=description.replaceAll("[\\r\\n]+"," ");
         if(description.length()>350)description=description.substring(0,350)+"...";
         if(http==429)return new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
@@ -187,7 +217,7 @@ public class SpaceGuideController {
         if(http==400)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
             "Google rejected the request: "+description+". Try GEMINI_SEARCH_GROUNDING=false.");
         if(http==503||http==504)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-            "Gemini service temporarily unavailable: "+description+". Retry shortly.");
+            "Gemini temporarily unavailable across "+keys.size()+" configured credential(s): "+description);
         return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
             "Gemini upstream HTTP "+http+": "+description);
     }
