@@ -52,7 +52,11 @@ public class SpaceGuideController {
       OrbitLab uses JPL Horizons for heliocentric vectors and a separate JPL CAD feed for close approaches.
       Its planet sizes/distances, surface spin, lighting, ring bands and textures are visually approximated;
       never claim these are a fully accurate scientific simulation or current telemetry.
-      Explain accessibly in 2-4 short paragraphs with Markdown headings/bold/bullets when useful.
+      Format answers for a compact mobile-friendly chat panel. Begin with one direct 1-2 sentence answer.
+      If more detail is useful, use a brief **Key facts** section with up to 3 concise bullets.
+      Use short paragraphs, informative bold emphasis, and Markdown lists only when they clarify.
+      Avoid large tables, deep heading nesting, long introductions, and overly long responses.
+      Aim for 80-160 words for typical astronomy questions, longer only for complex requests.
       When a specific planet is discussed, you may suggest exploring it in OrbitLab, but don't imply
       you have already navigated the camera. The UI will provide navigation separately.
       Prefer reliable NASA/JPL, ESA, university, or peer-reviewed material when grounding is available.
