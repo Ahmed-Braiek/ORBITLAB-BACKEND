@@ -106,3 +106,28 @@ mvn spring-boot:run
 The response's `model` field shows which model actually answered. Visit `GET /api/space-guide/status` to confirm the effective settings. It is normal to have four configured credentials if the original `GEMINI_API_KEY` is still set as well as `_1`, `_2` and `_3`; extra keys do not fix model-wide 503 errors.
 
 For a guaranteed offline presentation fallback, prewrite static astronomy FAQs and label them as curated, non-AI material; the present backend does not automatically fake Gemini output.
+
+
+## Groq provider (free alternative to overloaded Gemini)
+
+Groq currently offers free-tier access with usage quotas. Use Groq's **GPT-OSS 20B** model to test a lightweight and fast astronomy chat; the **GPT-OSS 120B** model may be an alternative if your plan supports it. Do not use the older Llama 3.1 8B or Llama 3.3 70B model IDs for free-tier usage; Groq deprecated them for free and developer tiers in August 2026.
+
+1. Create a Groq key at https://console.groq.com/keys .
+2. Use PowerShell **in the terminal from which you start Spring Boot**:
+   ```powershell
+   $env:GROQ_API_KEY = [System.Net.NetworkCredential]::new("", (Read-Host "Groq API key" -AsSecureString)).Password
+   $env:ASTRA_AI_PROVIDER = "groq"
+   $env:GROQ_MODEL = "openai/gpt-oss-20b"
+   mvn spring-boot:run
+   ```
+3. Open http://localhost:8080/api/space-guide/status . Expect `provider:"groq"`, `configured:true`, `groqConfigured:true`.
+4. Test one question in PowerShell:
+   ```powershell
+   $payload = @{ message = "Why is Mars red?"; selectedPlanet = "mars"; history = @() } | ConvertTo-Json
+   Invoke-RestMethod -Uri "http://localhost:8080/api/space-guide/chat" -Method Post -ContentType "application/json" -Body $payload
+   ```
+5. Start Angular and open ASTRA. The frontend displays Groq as the active AI provider automatically.
+
+The Java API endpoint and response shape are unchanged; no frontend API keys and no SDK dependency. `ASTRA_AI_PROVIDER=auto` selects Groq when a Groq key exists, otherwise Gemini. `ASTRA_AI_PROVIDER=gemini` forces the legacy Gemini provider. Other Gemini credentials may remain configured, but Groq mode does not call them. Chat completion is not real-time web search: response `sources:[]`, `grounded:false`; the UI truthfully notes that verified links were not returned. The planet-navigation button still works for an unambiguous planet question.
+
+Groq docs: https://console.groq.com/docs/api-reference , https://console.groq.com/docs/models , https://console.groq.com/docs/rate-limits .
