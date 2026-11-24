@@ -66,6 +66,9 @@ public class SpaceGuideController {
     private final String model;
     private final String fallbackModel;
     private final boolean searchEnabled;
+    private final String groqKey;
+    private final String groqModel;
+    private final String provider;
     // Guard accidental token consumption in a public classroom demo. This does NOT secure a public deployment.
     private long windowStarted = System.currentTimeMillis();
     private final AtomicInteger requestsInWindow = new AtomicInteger(0);
@@ -77,12 +80,18 @@ public class SpaceGuideController {
         @Value("${GEMINI_API_KEY_3:}") String key3,
         @Value("${GEMINI_MODEL:gemini-3.5-flash-lite}") String model,
         @Value("${GEMINI_FALLBACK_MODEL:gemini-3.1-flash-lite}") String fallbackModel,
-        @Value("${GEMINI_SEARCH_GROUNDING:false}") boolean searchEnabled) {
+        @Value("${GEMINI_SEARCH_GROUNDING:false}") boolean searchEnabled,
+        @Value("${GROQ_API_KEY:}") String groqKey,
+        @Value("${GROQ_MODEL:openai/gpt-oss-20b}") String groqModel,
+        @Value("${ASTRA_AI_PROVIDER:auto}") String provider) {
         this.keys=java.util.stream.Stream.of(key1,key2,key3,key)
             .filter(value->value!=null&&!value.isBlank()).distinct().toList();
         this.model = model.trim();
         this.fallbackModel = fallbackModel.trim();
         this.searchEnabled = searchEnabled;
+        this.groqKey = groqKey;
+        this.groqModel = groqModel.trim();
+        this.provider = provider.trim().toLowerCase(Locale.ROOT);
     }
 
     public record ChatTurn(@NotBlank @Size(max=1200) String role,@NotBlank @Size(max=1000) String content) {}
@@ -94,7 +103,17 @@ public class SpaceGuideController {
 
     @GetMapping("/status")
     public Map<String,Object> status() {
-        return Map.of("configured",!keys.isEmpty(),"keyCount",keys.size(),"model",model,"fallbackModel",fallbackModel,"localOnly",true,"searchGrounding",searchEnabled);
+        Map<String,Object> info=new LinkedHashMap<>();
+        info.put("configured",canServe());
+        info.put("provider",effectiveProvider());
+        info.put("groqConfigured",!groqKey.isBlank());
+        info.put("groqModel",groqModel);
+        info.put("keyCount",keys.size());
+        info.put("model",model);
+        info.put("fallbackModel",fallbackModel);
+        info.put("localOnly",true);
+        info.put("searchGrounding",searchEnabled && !"groq".equals(effectiveProvider()));
+        return info;
     }
 
     /** Return safe, actionable diagnostics; never expose the API key or raw request body. */
@@ -107,13 +126,81 @@ public class SpaceGuideController {
         return ResponseEntity.status(ex.getStatusCode()).body(result);
     }
 
+    private String effectiveProvider() {
+        if("groq".equals(provider)||"gemini".equals(provider))return provider;
+        return !groqKey.isBlank()?"groq":"gemini";
+    }
+
+    private boolean canServe() {
+        return "groq".equals(effectiveProvider())?!groqKey.isBlank():!keys.isEmpty();
+    }
+
+    private ChatResponse groqChat(ChatRequest request) {
+        if(groqKey.isBlank())throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+            "Groq is not configured. Set GROQ_API_KEY in the Spring Boot environment.");
+        List<Map<String,String>> messages=new ArrayList<>();
+        messages.add(Map.of("role","system","content",SYSTEM_PROMPT));
+        if(request.history()!=null){
+            for(ChatTurn turn:request.history()) {
+                if(turn==null||turn.content()==null||turn.role()==null)continue;
+                String role="assistant".equals(turn.role())?"assistant":"user";
+                messages.add(Map.of("role",role,"content",turn.content().length()>1000?turn.content().substring(0,1000):turn.content()));
+            }
+        }
+        String context=request.selectedPlanet()==null?"none":request.selectedPlanet().toLowerCase(Locale.ROOT);
+        if(!PLANETS.contains(context))context="none";
+        messages.add(Map.of("role","user","content","OrbitLab selected planet: "+context+"\\nQuestion: "+request.message()));
+        Map<String,Object> payload=new LinkedHashMap<>();
+        payload.put("model",groqModel);
+        payload.put("messages",messages);
+        payload.put("temperature",0.35);
+        payload.put("max_completion_tokens",750);
+        try {
+            HttpRequest outbound=HttpRequest.newBuilder(URI.create("https://api.groq.com/openai/v1/chat/completions"))
+                .header("Authorization","Bearer "+groqKey)
+                .header("Content-Type","application/json")
+                .timeout(Duration.ofSeconds(22))
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload),StandardCharsets.UTF_8))
+                .build();
+            HttpResponse<String> result=client.send(outbound,HttpResponse.BodyHandlers.ofString());
+            if(result.statusCode()!=200)throw groqFailure(result.statusCode(),result.body());
+            JsonNode root=json.readTree(result.body());
+            String text=root.path("choices").path(0).path("message").path("content").asText("").trim();
+            if(text.isBlank())throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                "Groq returned an empty answer. Try a shorter astronomy question.");
+            String actualModel=root.path("model").asText(groqModel);
+            // Groq ordinary chat completions do not return grounded search citations.
+            return new ChatResponse(text,List.of(),findNavigationTarget(request.message()),actualModel,false);
+        }catch(ResponseStatusException ex){throw ex;}
+        catch(InterruptedException ex){Thread.currentThread().interrupt();throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Groq request interrupted.",ex);}
+        catch(Exception ex){throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Groq did not respond in time. Check connectivity or try again.",ex);}
+    }
+
+    private ResponseStatusException groqFailure(int code,String body) {
+        String detail="";
+        try {detail=json.readTree(body).path("error").path("message").asText("");}catch(Exception ignored){}
+        detail=detail.replace(groqKey,"[REDACTED]").replaceAll("[\\r\\n]+"," ");
+        if(detail.length()>250)detail=detail.substring(0,250)+"...";
+        if(detail.isBlank())detail="Upstream HTTP "+code;
+        if(code==429)return new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+            "Groq free-tier limit reached: "+detail+". Check your Groq console limits.");
+        if(code==401||code==403)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Groq authorization denied: "+detail+". Check GROQ_API_KEY.");
+        if(code==400||code==404)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Groq rejected model "+groqModel+": "+detail+". Check available models in Groq console.");
+        if(code==503||code==502||code==504)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Groq temporarily unavailable: "+detail);
+        return new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Groq returned HTTP "+code+": "+detail);
+    }
+
     @PostMapping("/chat")
     public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        if(keys.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                "Gemini not configured. Set GEMINI_API_KEY in the Spring Boot environment.");
-        }
+        if(!canServe())throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+            "ASTRA AI not configured. Set GROQ_API_KEY or a Gemini API key in the Spring Boot environment.");
         limitRequests();
+        if("groq".equals(effectiveProvider()))return groqChat(request);
         final List<Map<String,Object>> contents = new ArrayList<>();
         if(request.history()!=null) {
             for(ChatTurn turn:request.history()) {
