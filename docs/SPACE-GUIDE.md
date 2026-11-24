@@ -53,3 +53,20 @@ The Gemini key stays in Spring Boot's environment. No public deployment, multi-u
 
 ## Tests
 `mvn clean test` covers unconfigured keys, basic prompt validation, and planet routing. A real Gemini end-to-end test requires a key, internet, and available free-tier quota.
+
+## November 2026 free-tier compatibility and 502 diagnostics
+
+ASTRA now defaults to `gemini-3.1-flash-lite` with `GEMINI_SEARCH_GROUNDING=false` for **free-tier text generation**. Google's Gemini 3+ models do not include API Google Search grounding on the free tier. If you have an existing API key with a working `gemini-2.5-flash-lite` entitlement, you can explicitly select it and enable `GEMINI_SEARCH_GROUNDING=true` (subject to that model's free search quotas).
+
+PowerShell:
+```powershell
+$env:GEMINI_API_KEY="YOUR_PRIVATE_KEY"
+$env:GEMINI_MODEL="gemini-3.1-flash-lite"
+$env:GEMINI_SEARCH_GROUNDING="false"
+mvn spring-boot:run
+```
+
+Visit `GET /api/space-guide/status` for the effective model and grounding setting.
+If the backend returns HTTP 502, Angular now shows the **sanitized Google error reason**, distinguishing invalid keys, unavailable models, unsupported tools, quota exhaustion, and temporary provider errors. A missing citation indicates ungrounded generated text: **never present it as verified by Google Search**.
+
+If you wish to try another model, first verify its availability in Google AI Studio. Do not enable billing just to make the project demo work.
