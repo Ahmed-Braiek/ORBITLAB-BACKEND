@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -60,15 +61,18 @@ public class SpaceGuideController {
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final String key;
     private final String model;
+    private final boolean searchEnabled;
     // Guard accidental token consumption in a public classroom demo. This does NOT secure a public deployment.
     private long windowStarted = System.currentTimeMillis();
     private final AtomicInteger requestsInWindow = new AtomicInteger(0);
 
     public SpaceGuideController(
         @Value("${GEMINI_API_KEY:}") String key,
-        @Value("${GEMINI_MODEL:gemini-2.5-flash-lite}") String model) {
+        @Value("${GEMINI_MODEL:gemini-2.5-flash-lite}") String model,
+        @Value("${GEMINI_SEARCH_GROUNDING:true}") boolean searchEnabled) {
         this.key = key;
         this.model = model;
+        this.searchEnabled = searchEnabled;
     }
 
     public record ChatTurn(@NotBlank @Size(max=1200) String role,@NotBlank @Size(max=1000) String content) {}
@@ -80,7 +84,17 @@ public class SpaceGuideController {
 
     @GetMapping("/status")
     public Map<String,Object> status() {
-        return Map.of("configured",!key.isBlank(),"model",model,"localOnly",true);
+        return Map.of("configured",!key.isBlank(),"model",model,"localOnly",true,"searchGrounding",searchEnabled);
+    }
+
+    /** Return safe, actionable diagnostics; never expose the API key or raw request body. */
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<Map<String,Object>> handleSpaceGuideError(ResponseStatusException ex) {
+        Map<String,Object> result=new LinkedHashMap<>();
+        result.put("error","SPACE_GUIDE_ERROR");
+        result.put("detail",ex.getReason()==null?"Space Guide request failed.":ex.getReason());
+        result.put("status",ex.getStatusCode().value());
+        return ResponseEntity.status(ex.getStatusCode()).body(result);
     }
 
     @PostMapping("/chat")
@@ -106,7 +120,7 @@ public class SpaceGuideController {
         Map<String,Object> body = new LinkedHashMap<>();
         body.put("systemInstruction",Map.of("parts",List.of(Map.of("text",SYSTEM_PROMPT))));
         body.put("contents",contents);
-        body.put("tools",List.of(Map.of("google_search",Map.of())));
+        if(searchEnabled)body.put("tools",List.of(Map.of("google_search",Map.of())));
         body.put("generationConfig",Map.of("temperature",0.38,"maxOutputTokens",1100));
         try {
             String payload=json.writeValueAsString(body);
@@ -118,14 +132,20 @@ public class SpaceGuideController {
                 .timeout(Duration.ofSeconds(38))
                 .POST(HttpRequest.BodyPublishers.ofString(payload,StandardCharsets.UTF_8)).build();
             HttpResponse<String> result=client.send(httpRequest,HttpResponse.BodyHandlers.ofString());
-            if(result.statusCode()==429)throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
-                "Gemini free-tier quota reached. Try again after the quota resets.");
-            if(result.statusCode()==400)throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-                "Gemini rejected this request; check the selected model and grounding availability.");
-            if(result.statusCode()==401||result.statusCode()==403)throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-                "Gemini API authorization failed; check GEMINI_API_KEY.");
-            if(result.statusCode()!=200)throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-                "Gemini unavailable (upstream HTTP "+result.statusCode()+").");
+            boolean fallbackWithoutSearch=false;
+            if(result.statusCode()==400 && searchEnabled && isGroundingError(result.body())){
+                // Only retry requests that Google explicitly rejects due to search/tool configuration.
+                Map<String,Object> plainBody=new LinkedHashMap<>(body);
+                plainBody.remove("tools");
+                HttpRequest fallback=HttpRequest.newBuilder(endpoint)
+                    .header("x-goog-api-key",key)
+                    .header("Content-Type","application/json")
+                    .timeout(Duration.ofSeconds(38))
+                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(plainBody),StandardCharsets.UTF_8)).build();
+                result=client.send(fallback,HttpResponse.BodyHandlers.ofString());
+                fallbackWithoutSearch=true;
+            }
+            if(result.statusCode()!=200)throw geminiFailure(result.statusCode(),result.body());
             JsonNode root=json.readTree(result.body());
             JsonNode candidate=root.path("candidates").path(0);
             StringBuilder answer=new StringBuilder();
@@ -142,6 +162,41 @@ public class SpaceGuideController {
         } catch(Exception e) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Gemini request failed. Check connectivity.",e);
         }
+    }
+
+    private ResponseStatusException geminiFailure(int http,String response){
+        String description="";
+        try {
+            JsonNode err=json.readTree(response).path("error");
+            String code=err.path("status").asText("");
+            String message=err.path("message").asText("");
+            if(!code.isBlank())description=code+": ";
+            description+=message;
+        }catch(Exception ignored){}
+        if(description.isBlank())description="Upstream HTTP "+http;
+        description=description.replace(key,"[REDACTED]");
+        description=description.replaceAll("[\\r\\n]+"," ");
+        if(description.length()>350)description=description.substring(0,350)+"...";
+        if(http==429)return new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
+            "Google quota reached: "+description+". Check AI Studio rate limits or wait for reset.");
+        if(http==401||http==403)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Google rejected authentication/access: "+description+". Check API key and project permissions.");
+        if(http==404)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Gemini model not available for this project: "+model+". "+description
+            +". Choose an available FREE model in Google AI Studio and set GEMINI_MODEL.");
+        if(http==400)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Google rejected the request: "+description+". Try GEMINI_SEARCH_GROUNDING=false.");
+        if(http==503||http==504)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Gemini service temporarily unavailable: "+description+". Retry shortly.");
+        return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Gemini upstream HTTP "+http+": "+description);
+    }
+    private boolean isGroundingError(String payload){
+        try {
+            String msg=json.readTree(payload).path("error").path("message").asText("").toLowerCase(Locale.ROOT);
+            return msg.contains("google_search")||msg.contains("grounding")||msg.contains("search tool")
+                ||msg.contains("tool is not supported")||msg.contains("tool use");
+        }catch(Exception ex){return false;}
     }
 
     private synchronized void limitRequests(){
