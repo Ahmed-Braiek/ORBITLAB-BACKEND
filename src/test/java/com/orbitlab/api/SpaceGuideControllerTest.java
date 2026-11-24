@@ -9,7 +9,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-@SpringBootTest(properties="GEMINI_API_KEY=")
+// Force a credential-free provider regardless of the developer's real shell environment.
+@SpringBootTest(properties={"ASTRA_AI_PROVIDER=groq","GROQ_API_KEY=","GEMINI_API_KEY=","GEMINI_API_KEY_1=","GEMINI_API_KEY_2=","GEMINI_API_KEY_3="})
 @AutoConfigureMockMvc
 class SpaceGuideControllerTest {
  @Autowired MockMvc mvc;
@@ -17,7 +18,7 @@ class SpaceGuideControllerTest {
   mvc.perform(get("/api/space-guide/status")).andExpect(status().isOk())
      .andExpect(jsonPath("$.configured").value(false));
  }
- @Test void neverCallsGeminiWithoutKey() throws Exception {
+ @Test void neverCallsAiProviderWithoutKey() throws Exception {
   mvc.perform(post("/api/space-guide/chat").contentType(MediaType.APPLICATION_JSON)
     .content("{\"message\":\"Why is Mars red?\",\"history\":[],\"selectedPlanet\":\"mars\"}"))
     .andExpect(status().isServiceUnavailable());
