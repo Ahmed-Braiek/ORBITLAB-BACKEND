@@ -90,3 +90,19 @@ mvn spring-boot:run
 ```
 
 For a single key, continue using `GEMINI_API_KEY`. Real availability and free-tier eligibility are governed by Google's terms, project quotas and current model capacity. The backend local demo request guard still limits requests to eight per minute.
+
+
+## Capacity fallback (November 2026)
+
+ASTRA now defaults to **`gemini-3.5-flash-lite`** (primary) and **`gemini-3.1-flash-lite`** (fallback). Both currently list free text-generation access, subject to project eligibility and provider capacity. A single question triggers one primary attempt, then one fallback only on upstream 503/504, a network timeout, or model-unavailable 404. It does **not** try every key on the same overloaded model; 429 quota, authentication and invalid-request errors stop immediately.
+
+```powershell
+$env:GEMINI_MODEL="gemini-3.5-flash-lite"
+$env:GEMINI_FALLBACK_MODEL="gemini-3.1-flash-lite"
+$env:GEMINI_SEARCH_GROUNDING="false"
+mvn spring-boot:run
+```
+
+The response's `model` field shows which model actually answered. Visit `GET /api/space-guide/status` to confirm the effective settings. It is normal to have four configured credentials if the original `GEMINI_API_KEY` is still set as well as `_1`, `_2` and `_3`; extra keys do not fix model-wide 503 errors.
+
+For a guaranteed offline presentation fallback, prewrite static astronomy FAQs and label them as curated, non-AI material; the present backend does not automatically fake Gemini output.
