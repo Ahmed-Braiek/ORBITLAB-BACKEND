@@ -1,13 +1,18 @@
-# OrbitLab Backend — Java 21 Spring Boot
+# OrbitLab — Java backend
 
-Run locally with `mvn spring-boot:run`.
+Local Spring Boot 3.5, Java 21. No deployment.
 
-Endpoints:
+## Run
+```sh
+mvn spring-boot:run
+```
+
+## API
 - `GET /api/health`
 - `GET /api/planets`
-- `GET /api/planets/{id}`
-- `GET /api/asteroids/close-approaches` — real NASA/JPL close-approach records, server-side HTTPS request, 30-minute in-memory cache, no API key.
+- `GET /api/asteroids/close-approaches` (JPL close approaches)
+- `GET /api/ephemerides?date=2026-11-24` (**NASA/JPL Horizons** Sun-centered position vectors)
 
-The CAD endpoint returns data for near-Earth close approaches; it does not imply that those asteroids will hit Earth. Ephemerides and physical planet assets remain separate work. No hosting or paid API.
+The ephemeris endpoint retrieves 3 samples at midnight UTC for selected day -1, day, and day +1 for all 8 planets (source units AU, coordinate system Ecliptic J2000). The first request requires internet access and can take several seconds; results cache for 12 hours. It reports HTTP 502 when JPL is unavailable rather than returning invented astronomical coordinates.
 
-Source: https://ssd-api.jpl.nasa.gov/doc/cad.html
+This is an educational visualization, not navigational software. The Angular 3D scene uses non-linear distance scaling for legibility. See: https://ssd-api.jpl.nasa.gov/doc/horizons.html
