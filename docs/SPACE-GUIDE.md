@@ -70,3 +70,23 @@ Visit `GET /api/space-guide/status` for the effective model and grounding settin
 If the backend returns HTTP 502, Angular now shows the **sanitized Google error reason**, distinguishing invalid keys, unavailable models, unsupported tools, quota exhaustion, and temporary provider errors. A missing citation indicates ungrounded generated text: **never present it as verified by Google Search**.
 
 If you wish to try another model, first verify its availability in Google AI Studio. Do not enable billing just to make the project demo work.
+
+
+## Multiple Gemini credentials: bounded availability failover
+
+The local backend accepts up to three additional Gemini API keys using `GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`, and `GEMINI_API_KEY_3`. The legacy `GEMINI_API_KEY` remains supported as an optional fallback. Keys are filtered for duplicates, and `/api/space-guide/status` reports the number of configured keys without revealing any secrets.
+
+Request selection is round-robin. On a **temporary upstream 503/504** or network timeout, the backend can try the next configured credential with an 11-second timeout per attempt. It does **not** rotate keys after HTTP 429 quota/rate-limit responses, 401/403 authorization failures, 400 invalid requests or 404 unavailable models. This feature is for resilience of legitimately authorized projects, not bypassing per-project or account limits. Different keys accessing the same overloaded model may all get 503; key rotation cannot guarantee availability.
+
+Set variables in the same PowerShell terminal as Spring Boot (do not paste secrets into source code):
+
+```powershell
+$env:GEMINI_API_KEY_1 = Read-Host "Gemini key 1"
+$env:GEMINI_API_KEY_2 = Read-Host "Gemini key 2"
+$env:GEMINI_API_KEY_3 = Read-Host "Gemini key 3"
+$env:GEMINI_MODEL = "gemini-3.1-flash-lite"
+$env:GEMINI_SEARCH_GROUNDING = "false"
+mvn spring-boot:run
+```
+
+For a single key, continue using `GEMINI_API_KEY`. Real availability and free-tier eligibility are governed by Google's terms, project quotas and current model capacity. The backend local demo request guard still limits requests to eight per minute.
