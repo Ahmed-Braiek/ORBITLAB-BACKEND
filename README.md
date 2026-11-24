@@ -1,13 +1,13 @@
-# OrbitLab — Backend
+# OrbitLab Backend — Java 21 Spring Boot
 
-Java 21 / Spring Boot 3.5 REST API. Phase 1 runs entirely on localhost.
+Run locally with `mvn spring-boot:run`.
 
-## Run
+Endpoints:
+- `GET /api/health`
+- `GET /api/planets`
+- `GET /api/planets/{id}`
+- `GET /api/asteroids/close-approaches` — real NASA/JPL close-approach records, server-side HTTPS request, 30-minute in-memory cache, no API key.
 
-```bash
-mvn spring-boot:run
-```
+The CAD endpoint returns data for near-Earth close approaches; it does not imply that those asteroids will hit Earth. Ephemerides and physical planet assets remain separate work. No hosting or paid API.
 
-Verify: `http://localhost:8080/api/health`, `http://localhost:8080/api/planets`, `http://localhost:8080/api/planets/earth`.
-
-These initial planet facts are locally defined and illustrative; NASA/JPL API integration and MySQL persistence are scheduled after the baseline client/server integration. No credit card, hosting, or environment secrets needed.
+Source: https://ssd-api.jpl.nasa.gov/doc/cad.html
