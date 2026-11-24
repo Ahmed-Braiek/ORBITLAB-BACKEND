@@ -48,3 +48,15 @@ Run `mvn clean test`. Repository integration tests use in-memory H2 rather than 
 ## Security and limitations
 
 The Observatory currently supports **one local profile, without login or authorization**. Do not expose the backend outside localhost or deploy this configuration publicly. API secrets and database credentials must never be committed. All astronomy graphics remain educational visualizations: JPL positions are real; distances in the frontend are compressed. The Java service may contact NASA/JPL over the internet but no hosting or paid API is needed.
+
+## Phase 8: Live local smoke test
+
+After Spring Boot connects to local MySQL, run from PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
+```
+
+The script creates uniquely named temporary favorite/list/entry rows, verifies REST reads, and removes temporary data. It requires the local backend to be running. It does not modify existing user observations. External JPL endpoints are tested separately, and the smoke test does not measure GPU rendering.
+
+See [docs/SOA-CONTRACT.md](docs/SOA-CONTRACT.md) for architecture and API documentation.
