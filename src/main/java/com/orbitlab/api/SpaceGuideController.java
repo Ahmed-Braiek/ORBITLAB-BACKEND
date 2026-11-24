@@ -64,6 +64,7 @@ public class SpaceGuideController {
     private final List<String> keys;
     private final AtomicInteger nextKey = new AtomicInteger();
     private final String model;
+    private final String fallbackModel;
     private final boolean searchEnabled;
     // Guard accidental token consumption in a public classroom demo. This does NOT secure a public deployment.
     private long windowStarted = System.currentTimeMillis();
@@ -74,11 +75,13 @@ public class SpaceGuideController {
         @Value("${GEMINI_API_KEY_1:}") String key1,
         @Value("${GEMINI_API_KEY_2:}") String key2,
         @Value("${GEMINI_API_KEY_3:}") String key3,
-        @Value("${GEMINI_MODEL:gemini-3.1-flash-lite}") String model,
+        @Value("${GEMINI_MODEL:gemini-3.5-flash-lite}") String model,
+        @Value("${GEMINI_FALLBACK_MODEL:gemini-3.1-flash-lite}") String fallbackModel,
         @Value("${GEMINI_SEARCH_GROUNDING:false}") boolean searchEnabled) {
         this.keys=java.util.stream.Stream.of(key1,key2,key3,key)
             .filter(value->value!=null&&!value.isBlank()).distinct().toList();
-        this.model = model;
+        this.model = model.trim();
+        this.fallbackModel = fallbackModel.trim();
         this.searchEnabled = searchEnabled;
     }
 
@@ -91,7 +94,7 @@ public class SpaceGuideController {
 
     @GetMapping("/status")
     public Map<String,Object> status() {
-        return Map.of("configured",!keys.isEmpty(),"keyCount",keys.size(),"model",model,"localOnly",true,"searchGrounding",searchEnabled);
+        return Map.of("configured",!keys.isEmpty(),"keyCount",keys.size(),"model",model,"fallbackModel",fallbackModel,"localOnly",true,"searchGrounding",searchEnabled);
     }
 
     /** Return safe, actionable diagnostics; never expose the API key or raw request body. */
@@ -130,9 +133,8 @@ public class SpaceGuideController {
         if(searchEnabled)body.put("tools",List.of(Map.of("google_search",Map.of())));
         body.put("generationConfig",Map.of("temperature",0.38,"maxOutputTokens",1100));
         try {
-            URI endpoint=URI.create("https://generativelanguage.googleapis.com/v1beta/models/"
-                +java.net.URLEncoder.encode(model,StandardCharsets.UTF_8)+":generateContent");
-            HttpResponse<String> result = sendWithFailover(endpoint,body);
+            ModelResult choice=sendWithModelFallback(body);
+            HttpResponse<String> result=choice.response();
             if(result.statusCode()!=200)throw geminiFailure(result.statusCode(),result.body());
             JsonNode root=json.readTree(result.body());
             JsonNode candidate=root.path("candidates").path(0);
@@ -144,7 +146,7 @@ public class SpaceGuideController {
             if(text.isBlank())throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
                 "Gemini did not return a text answer.");
             List<Source> sources=extractSources(candidate.path("groundingMetadata"));
-            return new ChatResponse(text,sources,findNavigationTarget(request.message()),model,!sources.isEmpty());
+            return new ChatResponse(text,sources,findNavigationTarget(request.message()),choice.model(),!sources.isEmpty());
         } catch(ResponseStatusException e) {
             throw e;
         } catch(Exception e) {
@@ -153,34 +155,44 @@ public class SpaceGuideController {
     }
 
     /**
-     * Round-robin request ownership across configured credentials.
-     * A different healthy key is tried only after transient 503/504 or transport timeouts.
-     * Explicit quota exhaustion (429), access restrictions (403), and invalid model
-     * errors are returned immediately; this mechanism must not bypass provider limits.
+     * One primary model attempt and (only for 503/504, a timeout, or unavailable
+     * model 404) one alternate-model attempt. 429 and authorization failures
+     * STOP; switching keys must not be used to evade provider quotas.
      */
-    private HttpResponse<String> sendWithFailover(URI endpoint,Map<String,Object> requestBody)
+    private record ModelResult(HttpResponse<String> response,String model) {}
+
+    private ModelResult sendWithModelFallback(Map<String,Object> requestBody)
         throws IOException,InterruptedException {
-        final int start=Math.floorMod(nextKey.getAndIncrement(),keys.size());
-        HttpResponse<String> last=null;
-        IOException lastNetworkError=null;
-        for(int attempt=0;attempt<keys.size();attempt++){
-            String activeKey=keys.get((start+attempt)%keys.size());
+        int start=Math.floorMod(nextKey.getAndIncrement(),keys.size());
+        String[] candidates=(fallbackModel.isBlank()||fallbackModel.equals(model))
+            ?new String[]{model}:new String[]{model,fallbackModel};
+        HttpResponse<String> latest=null;
+        IOException lastIo=null;
+        for(int i=0;i<candidates.length;i++){
+            String candidate=candidates[i];
+            URI endpoint=URI.create("https://generativelanguage.googleapis.com/v1beta/models/"
+                +java.net.URLEncoder.encode(candidate,StandardCharsets.UTF_8)+":generateContent");
+            // Rotate between legitimate credentials by question. Each model is
+            // tried at most once. Model failover is for availability, not quota.
+            String credential=keys.get((start+i)%keys.size());
             try {
-                last=sendOnce(endpoint,requestBody,activeKey);
-                if(last.statusCode()==400 && searchEnabled && isGroundingError(last.body())){
-                    Map<String,Object> fallback=new LinkedHashMap<>(requestBody);
-                    fallback.remove("tools");
-                    last=sendOnce(endpoint,fallback,activeKey);
+                HttpResponse<String> response=sendOnce(endpoint,requestBody,credential);
+                if(response.statusCode()==400 && searchEnabled && isGroundingError(response.body())){
+                    Map<String,Object> withoutSearch=new LinkedHashMap<>(requestBody);
+                    withoutSearch.remove("tools");
+                    response=sendOnce(endpoint,withoutSearch,credential);
                 }
-                if(last.statusCode()==200)return last;
-                if(last.statusCode()!=503 && last.statusCode()!=504)return last;
-            }catch(HttpTimeoutException e){lastNetworkError=e;}
-            catch(IOException e){lastNetworkError=e;}
+                latest=response;
+                if(response.statusCode()==200)return new ModelResult(response,candidate);
+                if(response.statusCode()!=503&&response.statusCode()!=504&&response.statusCode()!=404)
+                    return new ModelResult(response,candidate);
+            }catch(HttpTimeoutException ex){lastIo=ex;}
+            catch(IOException ex){lastIo=ex;}
         }
-        if(last!=null)return last;
-        if(lastNetworkError!=null)throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-            "Gemini connection timed out or failed across configured credentials. Check internet access, or try again.",lastNetworkError);
-        throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"No Gemini response was received.");
+        if(latest!=null)return new ModelResult(latest,candidates[candidates.length-1]);
+        throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+            "Gemini models did not respond within the timeout. Try again later or use AI Studio to check model availability.",
+            lastIo);
     }
 
     private HttpResponse<String> sendOnce(URI endpoint,Map<String,Object> requestBody,String activeKey)
@@ -188,7 +200,7 @@ public class SpaceGuideController {
         HttpRequest httpRequest=HttpRequest.newBuilder(endpoint)
             .header("x-goog-api-key",activeKey)
             .header("Content-Type","application/json")
-            .timeout(Duration.ofSeconds(11))
+            .timeout(Duration.ofSeconds(13))
             .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(requestBody),StandardCharsets.UTF_8))
             .build();
         return client.send(httpRequest,HttpResponse.BodyHandlers.ofString());
@@ -217,7 +229,7 @@ public class SpaceGuideController {
         if(http==400)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
             "Google rejected the request: "+description+". Try GEMINI_SEARCH_GROUNDING=false.");
         if(http==503||http==504)return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-            "Gemini temporarily unavailable across "+keys.size()+" configured credential(s): "+description);
+            "Gemini capacity unavailable on "+model+" and "+fallbackModel+": "+description);
         return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
             "Gemini upstream HTTP "+http+": "+description);
     }
