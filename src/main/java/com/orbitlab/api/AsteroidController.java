@@ -25,7 +25,7 @@ import org.springframework.web.server.ResponseStatusException;
  */
 @RestController
 @RequestMapping("/api/asteroids")
-@CrossOrigin(origins = "http://localhost:4200")
+@CrossOrigin(origins = "${ORBITLAB_CORS_ORIGINS:http://localhost:4200}")
 public class AsteroidController {
     private static final URI SOURCE = URI.create(
         "https://ssd-api.jpl.nasa.gov/cad.api?date-min=now&date-max=%2B30&dist-max=0.05&limit=25&fullname=true");
