@@ -26,7 +26,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/ephemerides")
-@CrossOrigin(origins="http://localhost:4200")
+@CrossOrigin(origins="${ORBITLAB_CORS_ORIGINS:http://localhost:4200}")
 public class EphemerisController {
     private static final String API = "https://ssd.jpl.nasa.gov/api/horizons.api";
     private static final Map<String,String> IDS = Map.of(
