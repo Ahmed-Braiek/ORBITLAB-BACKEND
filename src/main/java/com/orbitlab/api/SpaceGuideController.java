@@ -35,7 +35,7 @@ import org.springframework.web.server.ResponseStatusException;
 /** Local-only Gemini proxy: no API key or raw model credentials ever reach the browser. */
 @RestController
 @RequestMapping("/api/space-guide")
-@CrossOrigin(origins = "http://localhost:4200")
+@CrossOrigin(origins = "${ORBITLAB_CORS_ORIGINS:http://localhost:4200}")
 public class SpaceGuideController {
     private static final Set<String> PLANETS = Set.of(
         "mercury","venus","earth","mars","jupiter","saturn","uranus","neptune");
