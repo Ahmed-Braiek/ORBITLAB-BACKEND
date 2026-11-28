@@ -1,7 +1,7 @@
 package com.orbitlab.api;
 import java.util.List;
 import org.springframework.web.bind.annotation.*;
-@RestController @RequestMapping("/api") @CrossOrigin(origins="http://localhost:4200") public class PlanetController {
+@RestController @RequestMapping("/api") @CrossOrigin(origins="${ORBITLAB_CORS_ORIGINS:http://localhost:4200}") public class PlanetController {
  public record Planet(String id,String name,double radiusKm,double meanDistanceAu,double orbitalPeriodDays,String description) {}
  private static final List<Planet> PLANETS=List.of(
  new Planet("mercury","Mercury",2439.7,.387,87.97,"The smallest planet in the Solar System."),
