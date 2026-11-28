@@ -13,7 +13,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/observatory")
-@CrossOrigin(origins="http://localhost:4200")
+@CrossOrigin(origins="${ORBITLAB_CORS_ORIGINS:http://localhost:4200}")
 public class ObservatoryController {
  private final FavoriteRepository favorites;
  private final ObservationListRepository lists;
